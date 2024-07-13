@@ -8,6 +8,8 @@ use std::path::Path;
 use quote::quote;
 use syn::{DeriveInput, LitInt, LitStr, parse_macro_input};
 
+mod encode;
+
 #[proc_macro_derive(Decode)]
 pub fn decode_derive(input: TokenStream) -> TokenStream {
     // Parse the input tokens into a syntax tree
@@ -62,10 +64,16 @@ pub fn decode_derive(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-#[proc_macro_derive(Encode)]
+#[proc_macro_derive(Encode, attributes(encode))]
 pub fn encode_derive(input: TokenStream) -> TokenStream {
-    // Parse the input tokens into a syntax tree
     let input = parse_macro_input!(input as DeriveInput);
+
+    let output = encode::generate_encode_func(input);
+
+    TokenStream::from(output)
+
+
+    /*// Parse the input tokens into a syntax tree
 
     // Used to store all field encoding statements
     let mut field_statements = Vec::new();
@@ -132,7 +140,7 @@ pub fn encode_derive(input: TokenStream) -> TokenStream {
 
 
     // Hand the output tokens back to the compiler
-    TokenStream::from(expanded)
+    TokenStream::from(expanded)*/
 }
 
 /// Just exists, so we can use it in the packet attribute
@@ -260,7 +268,7 @@ pub fn bake_packet_registry(input: TokenStream) -> TokenStream {
             match_arms.push(quote! {
                 (#packet_id, #state) => {
                     let packet = crate::packets::incoming::#struct_name_lowercase::#struct_name::decode(cursor).await?;
-                    packet.handle(&mut conn).await?;
+                    packet.handle(conn_owned).await?;
                 },
             });
         }
@@ -273,11 +281,10 @@ pub fn bake_packet_registry(input: TokenStream) -> TokenStream {
     let match_arms = match_arms.into_iter();
 
     let output = quote! {
-        pub async fn handle_packet(packet_id: u8, conn_owned: &mut Arc<RwLock<crate::Connection>>, cursor: &mut std::io::Cursor<Vec<u8>>) -> ferrumc_utils::prelude::Result<()> {
-            let mut conn = conn_owned.write().await;
-            match (packet_id, conn.state.as_str()) {
+        pub async fn handle_packet(packet_id: u8, conn_owned: &mut crate::Connection, cursor: &mut std::io::Cursor<Vec<u8>>) -> ferrumc_utils::prelude::Result<()> {
+            match (packet_id, conn_owned.state.as_str()) {
                 #(#match_arms)*
-                _ => println!("No packet found for ID: 0x{:02X} in state: {}", packet_id, conn_owned.read().await.state.as_str()),
+                _ => println!("No packet found for ID: 0x{:02X} in state: {}", packet_id, conn_owned.state.as_str()),
             }
 
             Ok(())

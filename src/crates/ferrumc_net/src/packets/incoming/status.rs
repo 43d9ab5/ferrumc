@@ -1,21 +1,28 @@
 use base64::Engine;
-use log::info;
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::OnceCell;
+use tracing::info;
 
 use ferrumc_macros::{Decode, packet};
 use ferrumc_utils::config;
 use ferrumc_utils::encoding::varint::VarInt;
+use ferrumc_utils::prelude::*;
+use ferrumc_utils::type_impls::Encode;
 
 use crate::Connection;
 use crate::packets::IncomingPacket;
 use crate::packets::outgoing::status::OutgoingStatusResponse;
 
+/// The status packet is sent by the client to the server to request the server's status.
+/// 
+/// Usually sent after handshaking is completed.
 #[derive(Decode)]
 #[packet(packet_id = 0x00, state = "status")]
 pub struct Status;
 
+/// The response to the status packet.
+/// Sent as json.
 #[derive(Serialize)]
 struct JsonResponse {
     version: Version,
@@ -49,7 +56,7 @@ struct Description {
 }
 
 impl IncomingPacket for Status {
-    async fn handle(&self, conn: &mut tokio::sync::RwLockWriteGuard<'_, Connection>) -> Result<(), Error> {
+    async fn handle(&self, conn: &mut Connection) -> Result<()> {
         info!("Handling status request packet");
         let config = config::get_global_config();
 
@@ -79,23 +86,36 @@ impl IncomingPacket for Status {
                     text: config.motd.clone(),
                 },
                 favicon: get_encoded_favicon().await,
-            }).unwrap(),
+            })
+            .unwrap(),
         };
 
-        let response = response.encode().await?;
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        response.encode(&mut cursor).await?;
+        let response = cursor.into_inner();
 
-        conn.socket.write_all(&response).await.map_err(|e| e.into())
+        let response = &*response;
+
+        conn.socket.write(response).await?;
+
+        Ok(())
     }
 }
+
+/// Get the favicon as a base64 encoded string.
+/// 
+/// This is cached in a `OnceCell` to avoid reading the file every time.
 async fn get_encoded_favicon() -> &'static String {
-    static FAVICON: OnceCell<String> = OnceCell:: const_new();
-    FAVICON.get_or_init(|| async {
-        let mut data = Vec::new();
-        let Ok(mut image) = tokio::fs::File::open("icon-64.png").await else {
-            return String::new();
-        };
-        image.read_to_end(&mut data).await.unwrap_or_default();
-        let data = base64::engine::general_purpose::STANDARD.encode(&data);
-        format!("data:image/png;base64,{}", data)
-    }).await
+    static FAVICON: OnceCell<String> = OnceCell::const_new();
+    FAVICON
+        .get_or_init(|| async {
+            let mut data = Vec::new();
+            let Ok(mut image) = tokio::fs::File::open("icon-64.png").await else {
+                return String::new();
+            };
+            image.read_to_end(&mut data).await.unwrap_or_default();
+            let data = base64::engine::general_purpose::STANDARD.encode(&data);
+            format!("data:image/png;base64,{}", data)
+        })
+        .await
 }

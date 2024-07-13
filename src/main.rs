@@ -1,26 +1,24 @@
 #![feature(box_into_inner)]
 #![feature(fs_try_exists)]
 
-use std::{env, fs};
+use std::env;
 use std::sync::Arc;
+
+#[warn(unused_imports)]
+use clap::Parser;
 #[allow(unused_imports)]
 use tokio::fs::try_exists;
-#[warn(unused_imports)]
-use clap::{Parser};
-
-use log::{debug, error, info, trace};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
+use tracing::{debug, error, info, Instrument, trace};
 
 use ferrumc_utils::prelude::*;
 
-mod prelude;
+mod setup;
 mod tests;
 mod utils;
-mod setup;
 
 type SafeConfig = Arc<RwLock<ferrumc_utils::config::ServerConfig>>;
-
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -29,33 +27,10 @@ struct Cli {
     setup: bool,
 }
 
-
 #[tokio::main]
 async fn main() -> Result<()> {
-
-    let args = Cli::parse();
-
-    if env::var("GITHUB_ACTIONS").is_ok() {
-        env::set_var("RUST_LOG", "info");
-    }
-    else if args.setup {
-        setup::setup().await?;
+    if handle_setup().await? {
         return Ok(());
-    } else {
-        let exe = std::env::current_exe()?;
-        let dir = exe.parent();
-        match dir {
-            Some(dir) => {
-                let config_path = dir.join("config.toml");
-                if !config_path.exists() {
-                    setup::setup().await?;
-                }
-            }
-            None => {
-                error!("No parent directory found for executable! Please don't try run ferrumc from root, its really not a good idea");
-                return Ok(());
-            }
-        }
     }
 
     utils::setup_logger();
@@ -78,6 +53,9 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Starts the server. Sets up the sockets and listens for incoming connections
+///
+/// The actual management of connections in handled by [ferrumc_net::init_connection]
 async fn start_server(config: SafeConfig) -> Result<()> {
     let config = config.read().await;
     trace!("Starting server on {}:{}", config.host, config.port);
@@ -91,11 +69,60 @@ async fn start_server(config: SafeConfig) -> Result<()> {
     drop(config);
 
     loop {
-        let (socket, _) = listener.accept().await?;
+        let (socket, addy) = listener.accept().await?;
         // show a line of 100 dashes
         trace!("{}", "-".repeat(100));
         debug!("Accepted connection from: {:?}", socket.peer_addr()?);
 
-        tokio::task::spawn(ferrumc_net::handle_connection(socket));
+        tokio::task::spawn(
+            async {
+                if let Err(e) = ferrumc_net::init_connection(socket).await {
+                    error!("Error handling connection: {:?}", e);
+                }
+            }
+            .instrument(tracing::info_span!("handle_connection", %addy)),
+        );
+    }
+}
+
+/// Handles the setup of the server
+///
+/// If the server is running in a CI environment, it will set the log level to info
+///
+/// Returns True if the server should exit after setup
+///
+/// Runs [setup::setup] if the server needs setting up
+async fn handle_setup() -> Result<bool> {
+    let args = Cli::parse();
+
+    // This env var will be present if the server is running in a CI environment
+    // This will lead to set up not running, but we just need to check for compilation success, not actual functionality
+    if env::var("GITHUB_ACTIONS").is_ok() {
+        env::set_var("RUST_LOG", "info");
+        Ok(false)
+    // If the setup flag is passed, run the setup regardless of the config file
+    } else if args.setup {
+        setup::setup().await?;
+        return Ok(true);
+    // Check if the config file exists already and run the setup if it doesn't
+    } else {
+        // Get the path to the current executable
+        let exe = std::env::current_exe()?;
+        // This should be the directory the executable is in.
+        // This should always work but if it doesn't, we'll just return an error
+        let dir = exe.parent();
+        match dir {
+            Some(dir) => {
+                let config_path = dir.join("config.toml");
+                if !config_path.exists() {
+                    setup::setup().await?;
+                }
+                Ok(false)
+            }
+            None => {
+                error!("Failed to get the directory of the executable. Exiting...");
+                return Ok(true);
+            }
+        }
     }
 }
