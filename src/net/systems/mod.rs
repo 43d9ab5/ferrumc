@@ -5,10 +5,12 @@ use tracing::{debug_span, info, Instrument};
 use crate::state::GlobalState;
 use crate::utils::prelude::*;
 
-pub mod chunk_sender;
-pub mod keep_alive_system;
-pub mod tick_system;
-pub mod connection_handler;
+mod chunk_sender;
+mod keep_alive_system;
+mod tick_system;
+mod connection_handler;
+mod command_system;
+
 
 #[async_trait]
 pub trait System: Send + Sync {
@@ -22,6 +24,7 @@ pub static ALL_SYSTEMS: &[&dyn System] = &[
     &keep_alive_system::KeepAliveSystem,
     &chunk_sender::ChunkSender,
     &connection_handler::ConnectionHandler,
+    &command_system::CommandSystem::new(),
 ];
 
 pub async fn start_all_systems(state: GlobalState) -> Result<()> {
